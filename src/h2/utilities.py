@@ -170,6 +170,93 @@ def authority_from_headers(headers: Iterable[Header]) -> bytes | None:
     return None
 
 
+def extract_priority_header(headers: Iterable[Header]) -> tuple[int, bool] | None:
+    """
+    Given a header set, searches for ``priority`` header fields, as defined
+    by RFC 9218, and parses them into structured extensible priority
+    information.
+
+    If multiple ``priority`` header fields are present, only the last one is
+    used. Malformed header fields are a protocol error.
+
+    :param headers: The HTTP header set.
+    :returns: A tuple of ``(urgency, incremental)``, or ``None`` if no
+        ``priority`` header field is present.
+    :raises: ``ProtocolError``
+    """
+    priority = None
+
+    for n, v in headers:
+        if n == b"priority":
+            priority = _parse_priority_header_value(v)
+
+    return priority
+
+
+def _parse_priority_header_value(value: bytes) -> tuple[int, bool]:
+    """
+    Parses the value of a single ``priority`` header field into a tuple of
+    ``(urgency, incremental)``.
+
+    The field value is a Structured Fields Dictionary (RFC 8941) that may
+    contain the ``u`` and ``i`` parameters defined by RFC 9218. Unknown
+    parameters are ignored, as required by RFC 9218 § 4.
+
+    :param value: The header field value.
+    :returns: A tuple of ``(urgency, incremental)``.
+    :raises: ``ProtocolError``
+    """
+    urgency = 3
+    incremental = False
+    seen: set[bytes] = set()
+
+    for item in value.split(b","):
+        item = item.strip(b" \t")
+        if not item:
+            continue
+
+        key, separator, parameter_value = item.partition(b"=")
+        key = key.strip(b" \t")
+        parameter_value = parameter_value.strip(b" \t")
+
+        if key not in (b"u", b"i"):
+            # Unknown parameters must be ignored: RFC 9218 § 4.
+            continue
+
+        if key in seen:
+            msg = (
+                f"Invalid priority header: parameter {key.decode('ascii')} "
+                "appears more than once"
+            )
+            raise ProtocolError(msg)
+        seen.add(key)
+
+        if key == b"u":
+            if not separator or not parameter_value or not parameter_value.isdigit():
+                msg = (
+                    "Invalid priority header: parameter u must be an "
+                    "integer between 0 and 7"
+                )
+                raise ProtocolError(msg)
+            urgency = int(parameter_value)
+            if urgency > 7:
+                msg = (
+                    f"Invalid priority header: parameter u is out of "
+                    f"range: {urgency}"
+                )
+                raise ProtocolError(msg)
+        else:
+            if separator:
+                msg = (
+                    "Invalid priority header: parameter i must not "
+                    "have a value"
+                )
+                raise ProtocolError(msg)
+            incremental = True
+
+    return urgency, incremental
+
+
 # Flags used by the validate_headers pipeline to determine which checks
 # should be applied to a given set of headers.
 class HeaderValidationFlags(NamedTuple):
@@ -723,4 +810,3 @@ class SizeLimitDict(collections.OrderedDict[int, Any]):
         if self._size_limit is not None:
             while len(self) > self._size_limit:
                 self.popitem(last=False)
-

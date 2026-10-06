@@ -368,3 +368,241 @@ class TestPriority:
                 headers=self.example_response_headers,
                 priority_weight=16,
             )
+
+
+class TestPriorityHeader:
+    """
+    Tests for the RFC 9218 ``priority`` header field.
+    """
+
+    example_request_headers = [
+        (":authority", "example.com"),
+        (":path", "/"),
+        (":scheme", "https"),
+        (":method", "GET"),
+    ]
+    example_request_headers_bytes = [
+        (b":authority", b"example.com"),
+        (b":path", b"/"),
+        (b":scheme", b"https"),
+        (b":method", b"GET"),
+    ]
+    example_response_headers = [
+        (":status", "200"),
+        ("server", "pytest-h2"),
+    ]
+    server_config = h2.config.H2Configuration(client_side=False)
+
+    @pytest.mark.parametrize("request_headers", [example_request_headers, example_request_headers_bytes])
+    @pytest.mark.parametrize(
+        ("priority", "urgency", "incremental"),
+        [
+            ("u=3, i", 3, True),
+            ("u=1, i", 1, True),
+            ("u=5", 5, False),
+            ("u=0", 0, False),
+            ("u=7", 7, False),
+            ("i", 3, True),
+            ("i, u=4", 4, True),
+            ("u = 2 ,  i", 2, True),
+        ],
+    )
+    def test_receiving_priority_header_emits_event(
+        self, frame_factory, request_headers, priority, urgency, incremental,
+    ) -> None:
+        """
+        Receiving a request with a ``priority`` header emits a
+        PriorityHeaderReceived event with the structured values, in addition
+        to RequestReceived.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+
+        header_name = b"priority" if isinstance(request_headers[0][0], bytes) else "priority"
+        value = priority.encode() if isinstance(request_headers[0][0], bytes) else priority
+        f = frame_factory.build_headers_frame(
+            headers=request_headers + [(header_name, value)],
+            stream_id=1,
+        )
+        events = c.receive_data(f.serialize())
+
+        assert len(events) == 2
+        assert isinstance(events[0], h2.events.RequestReceived)
+
+        event = events[1]
+        assert isinstance(event, h2.events.PriorityHeaderReceived)
+        assert event.stream_id == 1
+        assert event.urgency == urgency
+        assert event.incremental is incremental
+
+    def test_default_urgency_and_incremental(self, frame_factory) -> None:
+        """
+        A ``priority`` header without ``u`` or ``i`` exposes the RFC 9218
+        defaults of urgency 3 and non-incremental delivery.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_request_headers + [("priority", "foo=bar")],
+            stream_id=1,
+        )
+        events = c.receive_data(f.serialize())
+
+        event = events[-1]
+        assert isinstance(event, h2.events.PriorityHeaderReceived)
+        assert event.urgency == 3
+        assert event.incremental is False
+
+    def test_no_priority_header_no_event(self, frame_factory) -> None:
+        """
+        Requests without a ``priority`` header do not emit a
+        PriorityHeaderReceived event.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_request_headers,
+            stream_id=1,
+        )
+        events = c.receive_data(f.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.RequestReceived)
+
+    def test_multiple_priority_headers_last_wins(self, frame_factory) -> None:
+        """
+        When multiple ``priority`` header fields are present, only the last
+        one is used.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_request_headers + [
+                ("priority", "u=0"),
+                ("priority", "u=6, i"),
+            ],
+            stream_id=1,
+        )
+        events = c.receive_data(f.serialize())
+
+        priority_events = [
+            e for e in events
+            if isinstance(e, h2.events.PriorityHeaderReceived)
+        ]
+        assert len(priority_events) == 1
+        assert priority_events[0].urgency == 6
+        assert priority_events[0].incremental is True
+
+    @pytest.mark.parametrize(
+        ("priority", "parameter"),
+        [
+            ("u=8", "u"),
+            ("u=12", "u"),
+            ("u=x", "u"),
+            ("u=-1", "u"),
+            ("u=3x", "u"),
+            ("u", "u"),
+            ("u=", "u"),
+            ("u=1, u=2", "u"),
+            ("i=?1", "i"),
+            ("i=true", "i"),
+            ("i=", "i"),
+            ("i, i", "i"),
+        ],
+    )
+    def test_invalid_priority_header_is_protocol_error(
+        self, frame_factory, priority, parameter,
+    ) -> None:
+        """
+        Malformed ``priority`` header values are protocol errors, and the
+        error message identifies the offending parameter.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_request_headers + [("priority", priority)],
+            stream_id=1,
+        )
+        with pytest.raises(h2.exceptions.ProtocolError) as exc_info:
+            c.receive_data(f.serialize())
+
+        assert f"parameter {parameter}" in str(exc_info.value)
+
+        expected_frame = frame_factory.build_goaway_frame(
+            last_stream_id=1,
+            error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        )
+        assert c.data_to_send() == expected_frame.serialize()
+
+    def test_client_receives_priority_header_in_response(
+        self, frame_factory,
+    ) -> None:
+        """
+        A client receiving a response with a ``priority`` header gets the
+        same structured event as a server does for a request.
+        """
+        c = h2.connection.H2Connection()
+        c.initiate_connection()
+        c.send_headers(stream_id=1, headers=self.example_request_headers)
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_response_headers + [("priority", "u=2, i")],
+        )
+        events = c.receive_data(f.serialize())
+
+        assert len(events) == 2
+        assert isinstance(events[0], h2.events.ResponseReceived)
+
+        event = events[1]
+        assert isinstance(event, h2.events.PriorityHeaderReceived)
+        assert event.stream_id == 1
+        assert event.urgency == 2
+        assert event.incremental is True
+
+    def test_priority_header_alongside_priority_frame(
+        self, frame_factory,
+    ) -> None:
+        """
+        A ``priority`` header and RFC 7540 HEADERS frame priority
+        information coexist: both events are emitted and PriorityUpdated
+        keeps its existing fields.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.initiate_connection()
+        c.receive_data(frame_factory.preamble())
+
+        f = frame_factory.build_headers_frame(
+            headers=self.example_request_headers + [("priority", "u=5, i")],
+            stream_id=3,
+            flags=["PRIORITY"],
+            stream_weight=15,
+            depends_on=1,
+            exclusive=True,
+        )
+        events = c.receive_data(f.serialize())
+
+        assert isinstance(events[0], h2.events.RequestReceived)
+        priority_updated = events[1]
+        assert isinstance(priority_updated, h2.events.PriorityUpdated)
+        assert priority_updated.stream_id == 3
+        assert priority_updated.weight == 16
+        assert priority_updated.depends_on == 1
+        assert priority_updated.exclusive is True
+
+        priority_header = events[2]
+        assert isinstance(priority_header, h2.events.PriorityHeaderReceived)
+        assert priority_header.stream_id == 3
+        assert priority_header.urgency == 5
+        assert priority_header.incremental is True
+
+        assert events[0].priority_updated is priority_updated

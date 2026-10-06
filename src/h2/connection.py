@@ -38,6 +38,7 @@ from .events import (
     InformationalResponseReceived,
     PingAckReceived,
     PingReceived,
+    PriorityHeaderReceived,
     PriorityUpdated,
     RemoteSettingsChanged,
     RequestReceived,
@@ -62,7 +63,7 @@ from .exceptions import (
 from .frame_buffer import FrameBuffer
 from .settings import ChangedSetting, SettingCodes, Settings
 from .stream import H2Stream, StreamClosedBy
-from .utilities import SizeLimitDict, guard_increment_window
+from .utilities import SizeLimitDict, extract_priority_header, guard_increment_window
 from .windows import WindowManager
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -1630,6 +1631,18 @@ class H2Connection:
             stream_events[0].priority_updated = p_events[0]
             stream_events.extend(p_events)
             assert not p_frames
+
+        # If the headers contain an RFC 9218 ``priority`` header field, emit
+        # a structured event for it. This applies to both requests and
+        # responses, and is independent of the RFC 7540 priority information
+        # that may be present on the frame itself.
+        priority_header = extract_priority_header(headers)
+        if priority_header is not None:
+            stream_events.append(PriorityHeaderReceived(
+                stream_id=frame.stream_id,
+                urgency=priority_header[0],
+                incremental=priority_header[1],
+            ))
 
         return frames, events + stream_events
 

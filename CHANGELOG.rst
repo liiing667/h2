@@ -1,6 +1,17 @@
 Release History
 ===============
 
+4.5.0 (unreleased)
+------------------
+
+**API Changes (Backward Compatible)**
+
+- Added support for the ``priority`` header field defined by RFC 9218. When a
+  request or response is received carrying a ``priority`` header field, a new
+  :class:`PriorityHeaderReceived <h2.events.PriorityHeaderReceived>` event is
+  emitted, exposing the structured ``urgency`` and ``incremental`` values.
+  Malformed ``priority`` header fields are treated as protocol errors.
+
 4.4.1 (2026-08-03)
 ------------------
 
