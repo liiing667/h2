@@ -559,6 +559,47 @@ class PriorityUpdated(Event):
         )
 
 
+@dataclass(**kw_only)
+class PriorityUpdateReceived(Event):
+    """
+    The PriorityUpdateReceived event is fired whenever request or response
+    headers contain an RFC 9218 ``Priority`` header field (for example,
+    ``u=3, i``). Unlike :class:`PriorityUpdated`, which carries the RFC 7540
+    stream priority (weight, parent stream, and exclusivity), this event
+    exposes the structured extensible priority: an ``urgency`` between 0 and
+    7 and an ``incremental`` boolean.
+
+    The event is emitted immediately after the headers event
+    (:class:`RequestReceived` on the server side or :class:`ResponseReceived`
+    on the client side). If no ``Priority`` header field is present, no event
+    is emitted. When more than one ``Priority`` header field is present, only
+    the final one is considered.
+
+    .. versionadded:: 4.5.0
+    """
+
+    stream_id: int
+    """The Stream ID for the stream carrying the ``Priority`` header field."""
+
+    urgency: int = 3
+    """
+    The request urgency (the ``u`` parameter). An integer between 0 and 7;
+    defaults to 3 when the parameter is absent.
+    """
+
+    incremental: bool = False
+    """
+    Whether incremental delivery was requested (the ``i`` parameter).
+    Defaults to ``False`` when the parameter is absent.
+    """
+
+    def __repr__(self) -> str:
+        return (
+            f"<PriorityUpdateReceived stream_id:{self.stream_id}, "
+            f"urgency:{self.urgency}, incremental:{self.incremental}>"
+        )
+
+
 class ConnectionTerminated(Event):
     """
     The ConnectionTerminated event is fired when a connection is torn down by

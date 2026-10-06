@@ -106,6 +106,100 @@ def extract_method_header(headers: Iterable[Header]) -> bytes | None:
     return None
 
 
+def parse_priority_header(headers: Iterable[Header]) -> tuple[int, bool] | None:
+    """
+    Extracts and parses the RFC 9218 ``Priority`` header field, if present.
+
+    When several ``Priority`` header fields are present, only the final one
+    is considered. Unknown parameters are ignored, as required by RFC 9218.
+
+    :param headers: The HTTP/2 headers.
+    :raises ProtocolError: if the final ``Priority`` header field is
+        malformed. The error message names the offending parameter.
+    :returns: A ``(urgency, incremental)`` tuple, or ``None`` if no
+        ``Priority`` header field is present.
+    """
+    value: bytes | None = None
+    for name, header_value in headers:
+        if isinstance(name, str):
+            name = name.encode("utf-8")
+        if name.lower() != b"priority":
+            continue
+        if isinstance(header_value, str):
+            header_value = header_value.encode("utf-8")
+        value = header_value
+
+    if value is None:
+        return None
+
+    return _parse_priority_value(value)
+
+
+def _parse_priority_value(value: bytes) -> tuple[int, bool]:
+    """
+    Parses a single RFC 9218 ``Priority`` header field value into an
+    ``(urgency, incremental)`` tuple.
+    """
+    urgency = 3
+    incremental = False
+    seen: set[bytes] = set()
+
+    for member in value.split(b","):
+        member = member.strip(b" \t")
+        if not member:
+            msg = "Invalid Priority header field: empty parameter"
+            raise ProtocolError(msg)
+
+        key, separator, parameter_value = member.partition(b"=")
+        key = key.strip(b" \t")
+        parameter_value = parameter_value.strip(b" \t")
+
+        if not key:
+            msg = "Invalid Priority header field: empty parameter name"
+            raise ProtocolError(msg)
+        if key in seen:
+            msg = (
+                f"Invalid Priority header field: duplicate parameter "
+                f"{key.decode('ascii', 'backslashreplace')!r}"
+            )
+            raise ProtocolError(msg)
+        seen.add(key)
+
+        if key == b"u":
+            urgency = _parse_priority_urgency(separator, parameter_value)
+        elif key == b"i":
+            if separator:
+                msg = (
+                    "Invalid Priority header field: parameter 'i' "
+                    "must not carry a value"
+                )
+                raise ProtocolError(msg)
+            incremental = True
+        # Unknown parameters are ignored, per RFC 9218.
+
+    return urgency, incremental
+
+
+def _parse_priority_urgency(separator: bytes, raw_value: bytes) -> int:
+    """
+    Validates and parses the ``u`` parameter of a ``Priority`` header field.
+    """
+    if not separator or not raw_value or not all(0x30 <= byte <= 0x39 for byte in raw_value):
+        msg = (
+            f"Invalid Priority header field: parameter 'u' requires an "
+            f"integer value, got {raw_value!r}"
+        )
+        raise ProtocolError(msg)
+    urgency = int(raw_value)
+    if urgency > 7:
+        msg = (
+            f"Invalid Priority header field: parameter 'u' value {urgency} "
+            f"is out of range 0-7"
+        )
+        raise ProtocolError(msg)
+    return urgency
+
+
 def is_informational_response(headers: Iterable[Header]) -> bool:
     """
     Searches headers list for a :status header to confirm that a given

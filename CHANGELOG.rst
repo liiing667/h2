@@ -1,6 +1,17 @@
 Release History
 ===============
 
+4.5.0 (unreleased)
+------------------
+
+**API Changes (Backward Compatible)**
+
+- Added support for the RFC 9218 ``Priority`` header field. When request or
+  response headers contain a ``Priority`` header field, a new
+  ``PriorityUpdateReceived`` event is emitted, exposing the structured
+  ``urgency`` (0-7, default 3) and ``incremental`` (default ``False``)
+  parameters. Malformed header values are rejected with a ``ProtocolError``.
+
 4.4.1 (2026-08-03)
 ------------------
 

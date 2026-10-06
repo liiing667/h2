@@ -18,6 +18,7 @@ from .events import (
     DataReceived,
     Event,
     InformationalResponseReceived,
+    PriorityUpdateReceived,
     PushedStreamReceived,
     RequestReceived,
     ResponseReceived,
@@ -39,6 +40,7 @@ from .utilities import (
     is_informational_response,
     normalize_inbound_headers,
     normalize_outbound_headers,
+    parse_priority_header,
     utf8_encode_headers,
     validate_headers,
     validate_outbound_headers,
@@ -1104,6 +1106,17 @@ class H2Stream:
         headers_event.headers = self._process_received_headers(
             headers, hdr_validation_flags, header_encoding,
         )
+
+        if isinstance(headers_event, (RequestReceived, ResponseReceived)):
+            priority = parse_priority_header(headers_event.headers)
+            if priority is not None:
+                events.append(
+                    PriorityUpdateReceived(
+                        stream_id=self.stream_id,
+                        urgency=priority[0],
+                        incremental=priority[1],
+                    ),
+                )
         return [], events
 
     def receive_data(self, data: bytes, end_stream: bool, flow_control_len: int) -> tuple[list[Frame], list[Event]]:
